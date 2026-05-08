@@ -53,6 +53,21 @@ class TextVocabulary(BaseVocabulary):
             self.tokens = [t for t in data.keys() if t not in (self.EOS_TOKEN_STR, self.PAD_TOKEN_STR)]
         self._rebuild()
 
+    def __getstate__(self) -> Dict[str, Any]:
+        state = dict(self.__dict__)
+
+        # The trie is a derived runtime cache. Pickling it can recurse very
+        # deeply with large BPE/multilingual vocabularies.
+        state.pop("root", None)
+
+        return state
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        self.__dict__.update(state)
+
+        # Do not call _rebuild() here. That may reorder/rederive token ids.
+        # The checkpoint should preserve the exact saved token_map/index_map.
+        self._build_trie()
     @property
     def vocab_size(self) -> int:
         return self._vocab_size
@@ -82,7 +97,7 @@ class TextVocabulary(BaseVocabulary):
         }
 
         # start AFTER the special ids
-        start = max(self.token_map.values()) + 1  # 4
+        start = max(self.token_map.values()) + 1
         for i, t in enumerate(ordered, start=start):
             self.token_map[t] = i
 
@@ -137,7 +152,7 @@ class TextVocabulary(BaseVocabulary):
                 out.append(last_id)
                 i = last_pos
             else:
-                out.append(self.UNK_ID)  # << instead of PAD
+                out.append(self.UNK_ID)  # could not match character to vocab
                 i += 1
 
         return out
@@ -183,3 +198,37 @@ class TextVocabulary(BaseVocabulary):
             for ch in tok:
                 node = node.children.setdefault(ch, self._TrieNode())
             node.token_id = tid
+
+
+def export_vocab_state(vocab):
+    return {
+        "tokens": list(vocab.tokens),
+        "token_map": dict(vocab.token_map),
+        "index_map": dict(vocab.index_map),
+    }
+
+
+def rebuild_vocab(vocab_state):
+    vocab = TextVocabulary()
+
+    if "tokens" in vocab_state:
+        vocab.tokens = list(vocab_state["tokens"])
+        vocab._rebuild()
+        return vocab
+
+    specials = {
+        vocab.EOS_TOKEN_STR,
+        vocab.PAD_TOKEN_STR,
+        vocab.BOS_TOKEN_STR,
+        vocab.UNK_TOKEN_STR,
+    }
+
+    token_map = dict(vocab_state["token_map"])
+
+    vocab.tokens = [
+        tok for tok, _ in sorted(token_map.items(), key=lambda kv: int(kv[1]))
+        if tok not in specials
+    ]
+
+    vocab._rebuild()
+    return vocab
